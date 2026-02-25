@@ -1,0 +1,470 @@
+openapi: 3.0.3
+info:
+  title: Sealed Response Interfaces - Composition Cases
+  description: |
+    This spec demonstrates how the useSealedResponseInterfaces flag interacts with
+    various OpenAPI composition keywords (anyOf, oneOf, allOf) in response schemas.
+
+    CASE 1 - Multiple $ref responses (WORKS):
+      Each status code references a distinct schema via $ref. The generator creates a
+      sealed interface for the operation and each model implements it.
+      See: POST /users -> CreateUserResponse sealed interface
+
+    CASE 2 - anyOf inline in a single status code response (LIMITED):
+      The response body for one status code is defined inline using anyOf.
+      The generator currently only inspects get$ref() on the response schema, so it
+      does not resolve the anyOf members as individual sealed interface implementors.
+      The whole anyOf is treated as a single resolved type; no per-member sealed
+      interface is generated.
+      See: GET /search -> SearchResponse, 200 body is anyOf: [Article, Video]
+
+    CASE 3 - oneOf inline in a single status code response (LIMITED):
+      Same limitation as anyOf. The response body for one status code is defined
+      inline using oneOf. No sealed interface members are generated for the oneOf
+      schemas; the resolved type wraps the whole oneOf.
+      See: POST /payments -> ProcessPaymentResponse, 200 body is oneOf: [CreditCardResult, BankTransferResult]
+
+    CASE 4 - allOf inline in a single status code response (LIMITED):
+      The response body for one status code is defined inline using allOf. The
+      generator does not decompose allOf members into sealed interface implementors
+      either.
+      See: GET /items/{itemId} -> GetItemResponse, 200 body is allOf: [BaseItem, ItemDetails]
+
+    CASE 5 - Mixed: some statuses use $ref, one status uses inline anyOf (PARTIAL):
+      Some status codes for an operation use $ref (and get tracked for sealed
+      interfaces), while one status code uses an inline anyOf.  The $ref responses
+      still implement the sealed interface; the inline anyOf status code response
+      is not connected to the sealed interface.
+      See: PATCH /orders/{orderId} -> UpdateOrderResponse implemented by Order and
+           ValidationError, but the 422 inline anyOf is not part of it.
+
+    CASE 6 - Nested anyOf/oneOf in a returned model's fields (WORKS STRUCTURALLY):
+      A response references a model via $ref (so the sealed interface IS generated
+      correctly), but that model contains fields whose types are themselves
+      composed using anyOf or oneOf. The outer sealed interface works fine. The
+      nested composition is just a model-level concern handled separately by the
+      model generation logic, not the sealed interface machinery.
+      See: GET /orders/{orderId} -> GetOrderResponse implemented by Order, where
+           Order.payment is anyOf: [CreditCardPayment, BankTransferPayment] and
+           Order.items[*] is oneOf: [PhysicalItem, DigitalItem]
+  version: 1.0.0
+
+paths:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # CASE 1: Multiple distinct $ref responses for a single operation.
+  # Result: CreateUserResponse sealed interface is generated.
+  #         User, ConflictError, and ValidationError each implement it.
+  # ─────────────────────────────────────────────────────────────────────────────
+  /users:
+    post:
+      operationId: createUser
+      summary: Create a new user (Case 1 - multiple $ref responses)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUserRequest'
+      responses:
+        '200':
+          description: User created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '409':
+          description: Conflict - user already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConflictError'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # CASE 2: Inline anyOf in the 200 response body.
+  # Result: No sealed interface is generated for this operation because the
+  #         response schema has no $ref - the generator's $ref-based lookup finds
+  #         nothing to track.  The return type is the resolved anyOf wrapper.
+  # ─────────────────────────────────────────────────────────────────────────────
+  /search:
+    get:
+      operationId: search
+      summary: Search content (Case 2 - anyOf inline in response)
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Search results - may be an Article or a Video
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/Article'
+                  - $ref: '#/components/schemas/Video'
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # CASE 3: Inline oneOf in the 200 response body.
+  # Result: Same limitation as Case 2. No sealed interface is generated.
+  #         The return type is the resolved oneOf wrapper type.
+  # ─────────────────────────────────────────────────────────────────────────────
+  /payments:
+    post:
+      operationId: processPayment
+      summary: Process a payment (Case 3 - oneOf inline in response)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentRequest'
+      responses:
+        '200':
+          description: Payment result - either credit card or bank transfer confirmation
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/CreditCardResult'
+                  - $ref: '#/components/schemas/BankTransferResult'
+        '400':
+          description: Invalid payment details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # CASE 4: Inline allOf in the 200 response body.
+  # Result: Same limitation as Cases 2 & 3. No sealed interface is generated
+  #         because get$ref() is null on the allOf schema. The return type is
+  #         whatever the generator resolves the allOf composition to.
+  # ─────────────────────────────────────────────────────────────────────────────
+  /items/{itemId}:
+    get:
+      operationId: getItem
+      summary: Get a catalog item (Case 4 - allOf inline in response)
+      parameters:
+        - name: itemId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Item found - a composition of base attributes and extended details
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/BaseItem'
+                  - $ref: '#/components/schemas/ItemDetails'
+        '404':
+          description: Item not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotFoundError'
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # CASE 5: Mixed - some statuses use $ref, one status uses inline anyOf.
+  # Result: UpdateOrderResponse sealed interface IS generated.
+  #         Order and ValidationError implement it (via their $ref status codes).
+  #         The 422 inline anyOf is NOT connected to the sealed interface -
+  #         the generator does not see those schemas as response types.
+  # ─────────────────────────────────────────────────────────────────────────────
+  /orders/{orderId}:
+    patch:
+      operationId: updateOrder
+      summary: Update an order (Case 5 - mixed $ref and inline anyOf across status codes)
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateOrderRequest'
+      responses:
+        '200':
+          description: Order updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '400':
+          description: Validation errors in the request body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+        '422':
+          description: |
+            Business rule violation - either a state transition error or a
+            business constraint error. Inline anyOf; NOT tracked for the sealed interface.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/StateTransitionError'
+                  - $ref: '#/components/schemas/BusinessConstraintError'
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # CASE 6: Nested anyOf/oneOf inside a model returned via $ref.
+    # Result: GetOrderResponse sealed interface IS generated correctly because
+    #         the 200 response is a plain $ref.  Order implements GetOrderResponse.
+    #         Inside Order, the 'payment' field uses anyOf and the 'items' field
+    #         uses oneOf - these are model-level compositions and are handled by
+    #         the normal model generation, completely independently of the sealed
+    #         interface mechanism.
+    # ─────────────────────────────────────────────────────────────────────────
+    get:
+      operationId: getOrder
+      summary: Get an order (Case 6 - nested anyOf/oneOf inside the returned model)
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Order found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotFoundError'
+
+components:
+  schemas:
+
+    # ── Case 1 schemas ──────────────────────────────────────────────────────
+    CreateUserRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+
+    User:
+      type: object
+      required: [id, email]
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+
+    ConflictError:
+      type: object
+      required: [reason, conflictingId]
+      properties:
+        reason:
+          type: string
+        conflictingId:
+          type: string
+
+    ValidationError:
+      type: object
+      required: [field, message]
+      properties:
+        field:
+          type: string
+        message:
+          type: string
+
+    # ── Case 2 schemas ──────────────────────────────────────────────────────
+    Article:
+      type: object
+      required: [id, title, body]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        body:
+          type: string
+
+    Video:
+      type: object
+      required: [id, title, durationSeconds]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        durationSeconds:
+          type: integer
+
+    # ── Case 3 schemas ──────────────────────────────────────────────────────
+    PaymentRequest:
+      type: object
+      required: [amountCents, currency]
+      properties:
+        amountCents:
+          type: integer
+          format: int64
+        currency:
+          type: string
+
+    CreditCardResult:
+      type: object
+      required: [transactionId, last4]
+      properties:
+        transactionId:
+          type: string
+        last4:
+          type: string
+
+    BankTransferResult:
+      type: object
+      required: [transactionId, bankReference]
+      properties:
+        transactionId:
+          type: string
+        bankReference:
+          type: string
+
+    # ── Case 4 schemas ──────────────────────────────────────────────────────
+    BaseItem:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+
+    ItemDetails:
+      type: object
+      properties:
+        description:
+          type: string
+        priceCents:
+          type: integer
+          format: int64
+        tags:
+          type: array
+          items:
+            type: string
+
+    NotFoundError:
+      type: object
+      required: [resource, id]
+      properties:
+        resource:
+          type: string
+        id:
+          type: string
+
+    # ── Case 5 schemas ──────────────────────────────────────────────────────
+    UpdateOrderRequest:
+      type: object
+      properties:
+        status:
+          type: string
+
+    StateTransitionError:
+      type: object
+      required: [currentState, attemptedTransition]
+      properties:
+        currentState:
+          type: string
+        attemptedTransition:
+          type: string
+
+    BusinessConstraintError:
+      type: object
+      required: [constraint, details]
+      properties:
+        constraint:
+          type: string
+        details:
+          type: string
+
+    # ── Case 6 schemas ──────────────────────────────────────────────────────
+    # Order is returned via $ref so GetOrderResponse IS generated.
+    # But Order itself contains nested anyOf (payment) and oneOf (items[*])
+    # which are purely model-level compositions.
+    CreditCardPayment:
+      type: object
+      required: [cardNumber, expiryMonth, expiryYear]
+      properties:
+        cardNumber:
+          type: string
+        expiryMonth:
+          type: integer
+        expiryYear:
+          type: integer
+
+    BankTransferPayment:
+      type: object
+      required: [iban, bic]
+      properties:
+        iban:
+          type: string
+        bic:
+          type: string
+
+    PhysicalItem:
+      type: object
+      required: [sku, weight]
+      properties:
+        sku:
+          type: string
+        weight:
+          type: number
+
+    DigitalItem:
+      type: object
+      required: [downloadUrl]
+      properties:
+        downloadUrl:
+          type: string
+
+    Order:
+      type: object
+      required: [id, status]
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum: [pending, confirmed, shipped, delivered, cancelled]
+        # Nested anyOf in a model field - handled by model generation, not
+        # by the sealed response interface machinery.
+        payment:
+          anyOf:
+            - $ref: '#/components/schemas/CreditCardPayment'
+            - $ref: '#/components/schemas/BankTransferPayment'
+        # Nested oneOf in an array item type - same: model-level, not sealed interface.
+        items:
+          type: array
+          items:
+            oneOf:
+              - $ref: '#/components/schemas/PhysicalItem'
+              - $ref: '#/components/schemas/DigitalItem'
